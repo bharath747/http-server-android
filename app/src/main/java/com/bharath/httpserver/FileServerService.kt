@@ -110,7 +110,7 @@ class FileServerService : Service() {
 
     private fun resolve(root: DocumentFile, relative: String): DocumentFile? {
         var current = root
-        val clean = relative.replace('\\\\', '/').trim('/')
+        val clean = relative.replace('\\', '/').trim('/')
         if (clean.isBlank()) return current
         for (part in clean.split('/')) {
             if (part.isBlank() || part == "." || part == "..") return null
@@ -132,7 +132,6 @@ class FileServerService : Service() {
 
     private fun decode(value: String): String = try { URLDecoder.decode(value, "UTF-8") } catch (_: Exception) { value }
     private fun escapeJson(value: String): String = value.map { ch -> when (ch) { '\\' -> "\\\\"; '"' -> "\\\""; '\n' -> "\\n"; '\r' -> "\\r"; '\t' -> "\\t"; else -> ch.toString() } }.joinToString("")
-").replace("\r", "")
     private fun send(out: BufferedOutputStream, status: Int, type: String, body: ByteArray) {
         val reason = if (status == 200) "OK" else "Error"
         out.write(("HTTP/1.1 " + status + " " + reason + "\r\nContent-Type: " + type + "\r\nContent-Length: " + body.size +
