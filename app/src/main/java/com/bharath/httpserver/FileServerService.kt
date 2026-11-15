@@ -131,7 +131,8 @@ class FileServerService : Service() {
     }
 
     private fun decode(value: String): String = try { URLDecoder.decode(value, "UTF-8") } catch (_: Exception) { value }
-    private fun escapeJson(value: String): String = value.replace("\\\\", "\\\\\\\\").replace("\"", "\\\\"").replace("\n", "\\\\n").replace("\r", "")
+    private fun escapeJson(value: String): String = value.replace("\\\\", "\\\\\\\\").replace("\\\"", "\\\\\"" ).replace("\\n", "\\\\n").replace("\\r", "")
+").replace("\r", "")
     private fun send(out: BufferedOutputStream, status: Int, type: String, body: ByteArray) {
         val reason = if (status == 200) "OK" else "Error"
         out.write(("HTTP/1.1 " + status + " " + reason + "\r\nContent-Type: " + type + "\r\nContent-Length: " + body.size +
@@ -144,7 +145,7 @@ class FileServerService : Service() {
         running = false
         try { server?.close() } catch (_: Exception) {}
         server = null
-        if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
+        stopForeground(true)
     }
     override fun onDestroy() { stopServer(); workers.shutdownNow(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
