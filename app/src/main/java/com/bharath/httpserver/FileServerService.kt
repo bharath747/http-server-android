@@ -35,29 +35,31 @@ class FileServerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) { stopServer(); stopSelf(); return START_NOT_STICKY }
-        val uri = intent?.data ?: return START_NOT_STICKY
+        val uriStrings = intent?.getStringArrayListExtra(EXTRA_FOLDER_URIS) ?: intent?.data?.toString()?.let { arrayListOf(it) } ?: return START_NOT_STICKY
+        val roots = uriStrings.mapNotNull { runCatching { Uri.parse(it) }.getOrNull() }
+        if (roots.isEmpty()) return START_NOT_STICKY
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "http_server") else Notification.Builder(this)
-        startForeground(1, builder.setContentTitle("HTTP File Server").setContentText("Sharing on port 8080")
+        startForeground(1, builder.setContentTitle("HTTP File Server").setContentText("Sharing ${roots.size} folder(s) on port 8080")
             .setSmallIcon(android.R.drawable.stat_sys_upload_done).setOngoing(true).build())
-        if (!running) startServer(uri)
+        if (!running) startServer(roots)
         return START_NOT_STICKY
     }
 
-    private fun startServer(uri: Uri) {
+    private fun startServer(roots: List<Uri>) {
         running = true
         Thread {
             try {
                 server = ServerSocket(8080)
                 while (running) {
                     val socket = server?.accept() ?: break
-                    workers.submit { handle(socket, uri) }
+                    workers.submit { handle(socket, roots) }
                 }
             } catch (_: Exception) {
             } finally { running = false; stopSelf() }
         }.start()
     }
 
-    private fun handle(socket: java.net.Socket, treeUri: Uri) {
+    private fun handle(socket: java.net.Socket, roots: List<Uri>) {
         socket.use { client ->
             try {
                 client.soTimeout = 15000
@@ -92,8 +94,8 @@ class FileServerService : Service() {
                     val pair = item.split("=", limit = 2)
                     if (pair.size == 2) pair[0] to decode(pair[1]) else null
                 }.toMap()
-                val root = DocumentFile.fromTreeUri(this, treeUri)
-                if (root == null) { sendError(output, 404, "Shared folder unavailable"); return }
+                val availableRoots = roots.mapIndexedNotNull { index, uri -> DocumentFile.fromTreeUri(this, uri)?.let { index to it } }
+                if (availableRoots.isEmpty()) { sendError(output, 404, "Shared folders unavailable"); return }
                 when (path) {
                     "/" -> send(output, 200, "text/html; charset=utf-8", PAGE.toByteArray())
                     "/download-zip" -> {
@@ -102,7 +104,7 @@ class FileServerService : Service() {
                         if (requested.length() == 0 || requested.length() > 500) { sendError(output, 400, "Select between 1 and 500 items"); return }
                         val selected = ArrayList<DocumentFile>()
                         for (i in 0 until requested.length()) {
-                            val item = resolve(root, requested.optString(i))
+                            val item = resolveVirtual(availableRoots, requested.optString(i))
                             if (item == null || (!item.isFile && !item.isDirectory)) { sendError(output, 404, "Selected item not found"); return }
                             selected.add(item)
                         }
@@ -122,19 +124,27 @@ class FileServerService : Service() {
                         return
                     }
                     "/api/list" -> {
-                        val dir = resolve(root, params["path"].orEmpty())
+                        val requestedPath = params["path"].orEmpty()
+                        if (requestedPath.isBlank()) {
+                            val body = availableRoots.joinToString(prefix = "[", postfix = "]") { (index, folder) ->
+                                val name = folder.name ?: "Shared folder ${index + 1}"
+                                "{\"name\":\"" + escapeJson(name) + "\",\"dir\":true,\"size\":0,\"path\":\"folder-${index}\"}"
+                            }
+                            send(output, 200, "application/json; charset=utf-8", body.toByteArray())
+                            return
+                        }
+                        val dir = resolveVirtual(availableRoots, requestedPath)
                         if (dir == null || !dir.isDirectory) { sendError(output, 404, "Folder not found"); return }
                         val files = dir.listFiles().sortedWith(compareBy<DocumentFile> { !it.isDirectory }.thenBy { it.name?.lowercase().orEmpty() })
                         val body = files.joinToString(prefix = "[", postfix = "]") { file ->
-                            val parent = params["path"].orEmpty().trim('/')
-                            val childPath = (parent + "/" + (file.name ?: "")).trim('/')
+                            val childPath = (requestedPath.trimEnd('/') + "/" + (file.name ?: "")).trim('/')
                             "{\"name\":\"" + escapeJson(file.name ?: "unnamed") + "\",\"dir\":" + file.isDirectory +
                                 ",\"size\":" + file.length() + ",\"path\":\"" + escapeJson(childPath) + "\"}"
                         }
                         send(output, 200, "application/json; charset=utf-8", body.toByteArray())
                     }
                     "/download", "/view" -> {
-                        val file = resolve(root, params["path"].orEmpty())
+                        val file = resolveVirtual(availableRoots, params["path"].orEmpty())
                         if (file == null || !file.isFile) { sendError(output, 404, "File not found"); return }
                         val name = file.name ?: "download"
                         val ext = name.substringAfterLast('.', "").lowercase()
@@ -226,11 +236,13 @@ class FileServerService : Service() {
         }
     }
 
-    private fun resolve(root: DocumentFile, relative: String): DocumentFile? {
-        var current = root
+    private fun resolveVirtual(roots: List<Pair<Int, DocumentFile>>, relative: String): DocumentFile? {
         val clean = relative.replace('\\', '/').trim('/')
-        if (clean.isBlank()) return current
-        for (part in clean.split('/')) {
+        if (clean.isBlank()) return null
+        val parts = clean.split('/')
+        val rootIndex = parts.first().removePrefix("folder-").toIntOrNull() ?: return null
+        var current = roots.firstOrNull { it.first == rootIndex }?.second ?: return null
+        for (part in parts.drop(1)) {
             if (part.isBlank() || part == "." || part == "..") return null
             current = current.findFile(part) ?: return null
         }
@@ -270,6 +282,7 @@ class FileServerService : Service() {
     companion object {
         const val ACTION_START = "com.bharath.httpserver.START"
         const val ACTION_STOP = "com.bharath.httpserver.STOP"
+        const val EXTRA_FOLDER_URIS = "com.bharath.httpserver.FOLDER_URIS"
 
         fun findLanIp(): String {
             try {
@@ -300,7 +313,7 @@ function preview(p,type){const url='/view?path='+p;document.getElementById('prev
 function closePreview(){const modal=document.getElementById('previewModal');const video=modal.querySelector('video');if(video)video.pause();modal.classList.remove('open');document.getElementById('previewContent').innerHTML=''}
 function selected(){return Array.from(document.querySelectorAll('.pick:checked')).map(x=>x.value)}
 async function zip(paths){if(!paths.length){document.getElementById('status').textContent='Select at least one file or folder';return}const progress=document.getElementById('progress');progress.textContent='Preparing ZIP…';try{const response=await fetch('/download-zip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(paths)});if(!response.ok)throw Error(await response.text());const reader=response.body.getReader();const chunks=[];let received=0;while(true){const part=await reader.read();if(part.done)break;chunks.push(part.value);received+=part.value.length;progress.textContent='Receiving ZIP: '+size(received)}const blob=new Blob(chunks,{type:'application/zip'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='phone-files.zip';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);progress.textContent='ZIP ready · '+size(received);document.getElementById('status').textContent='Download started'}catch(e){progress.textContent='ZIP failed: '+e.message}}
-function downloadSelected(){zip(selected())}function downloadFolder(){zip([current])}
+function downloadSelected(){zip(selected())}function downloadFolder(){if(!current){document.getElementById('status').textContent='Open a shared folder first';return}zip([current])}
 load('');
 </script></body></html>
         """.trimIndent()
