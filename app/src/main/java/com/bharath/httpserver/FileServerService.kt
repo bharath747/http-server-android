@@ -131,7 +131,7 @@ class FileServerService : Service() {
     }
 
     private fun decode(value: String): String = try { URLDecoder.decode(value, "UTF-8") } catch (_: Exception) { value }
-    private fun escapeJson(value: String): String = value.replace("\\\\", "\\\\\\\\").replace("\\\"", "\\\\\"" ).replace("\\n", "\\\\n").replace("\\r", "")
+    private fun escapeJson(value: String): String = value.map { ch -> when (ch) { '\\' -> "\\\\"; '"' -> "\\\""; '\n' -> "\\n"; '\r' -> ""; else -> ch.toString() } }.joinToString("")
 ").replace("\r", "")
     private fun send(out: BufferedOutputStream, status: Int, type: String, body: ByteArray) {
         val reason = if (status == 200) "OK" else "Error"
